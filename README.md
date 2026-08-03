@@ -14,16 +14,6 @@
 
 ---
 
-## Локальный запуск (проверить перед деплоем)
-
-```powershell
-cd C:\bat\tg-claude-bot
-copy .env.example .env
-# впишите TELEGRAM_BOT_TOKEN и ANTHROPIC_API_KEY в .env
-npm install
-npm start
-```
-
 Напишите боту в Telegram — должен ответить.
 
 ---
@@ -50,16 +40,10 @@ sudo chown claudebot:claudebot /opt/tg-claude-bot
 
 ### 3. Загрузить код
 
-С локальной машины (из папки проекта):
-
-```powershell
-scp bot.js package.json .env.example tg-claude-bot.service root@ВАШ_IP:/opt/tg-claude-bot/
-```
-
-Или через git, если проект в репозитории:
+Через git, если проект в репозитории:
 
 ```bash
-sudo -u claudebot git clone https://github.com/ваш/репозиторий.git /opt/tg-claude-bot
+sudo -u claudebot git clone https://github.com/bi333on/claude-vps.git /opt/tg-claude-bot
 ```
 
 ### 4. Зависимости и конфиг
