@@ -20,6 +20,11 @@ const ALLOWED_USER_IDS = new Set(
 // Резервная модель при отказе классификаторов безопасности.
 // Поддерживается не всеми моделями — поэтому по умолчанию выключено.
 const ENABLE_FALLBACKS = /^(1|true|yes|on)$/i.test(process.env.ENABLE_FALLBACKS || "");
+// Telegram отдаёт ботам файлы не больше 20 МБ; base64 раздувает их на ~33%.
+const MAX_FILE_MB = Math.min(Number(process.env.MAX_FILE_MB || 15), 20);
+// За сколько последних сообщений держать картинки и PDF в контексте.
+// История уходит модели заново на каждый запрос, поэтому старое вычищаем.
+const MEDIA_CONTEXT_TURNS = Number(process.env.MEDIA_CONTEXT_TURNS || 2);
 
 // Клиент сам читает ANTHROPIC_API_KEY из окружения.
 const claude = new Anthropic();
@@ -94,6 +99,115 @@ function startTyping(chatId) {
   return () => clearInterval(timer);
 }
 
+async function downloadFile(fileId) {
+  const file = await tg("getFile", { file_id: fileId });
+  if (!file.file_path) throw new Error("Telegram не вернул путь к файлу");
+
+  const url = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${file.file_path}`;
+  const res = await fetch(url, { signal: AbortSignal.timeout(120_000) });
+  if (!res.ok) throw new Error(`Скачивание файла: HTTP ${res.status}`);
+
+  return Buffer.from(await res.arrayBuffer());
+}
+
+// ---------------------------------------------------------------- медиа ----
+
+const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
+const PDF_TYPE = "application/pdf";
+
+/** Достаёт из сообщения фото или документ, если он есть. */
+function extractMedia(message) {
+  if (message.photo?.length) {
+    // Массив отсортирован по возрастанию размера — берём самое детальное.
+    const largest = message.photo[message.photo.length - 1];
+    return {
+      fileId: largest.file_id,
+      mime: "image/jpeg",
+      name: "фото",
+      size: largest.file_size ?? 0,
+    };
+  }
+
+  const doc = message.document;
+  if (doc) {
+    return {
+      fileId: doc.file_id,
+      mime: doc.mime_type || "",
+      name: doc.file_name || "документ",
+      size: doc.file_size ?? 0,
+    };
+  }
+
+  return null;
+}
+
+/** Для типов вложений, которые бот не обрабатывает. */
+function unsupportedKind(message) {
+  if (message.voice) return "голосовые сообщения";
+  if (message.audio) return "аудиофайлы";
+  if (message.video || message.video_note) return "видео";
+  if (message.sticker) return "стикеры";
+  if (message.animation) return "гифки";
+  if (message.location || message.venue) return "геолокацию";
+  if (message.contact) return "контакты";
+  if (message.poll) return "опросы";
+  return null;
+}
+
+function mediaBlock(mime, base64) {
+  if (mime === PDF_TYPE) {
+    return { type: "document", source: { type: "base64", media_type: mime, data: base64 } };
+  }
+  return { type: "image", source: { type: "base64", media_type: mime, data: base64 } };
+}
+
+function formatMb(bytes) {
+  return (bytes / 1024 / 1024).toFixed(1);
+}
+
+/**
+ * Скачивает вложение и собирает content-блоки для Claude.
+ * Возвращает null, если файл не подходит — пользователю уже отправлено объяснение.
+ */
+async function buildMediaContent(chatId, media, text) {
+  const isPdf = media.mime === PDF_TYPE;
+
+  if (!isPdf && !IMAGE_TYPES.has(media.mime)) {
+    await reply(
+      chatId,
+      `Не умею читать файлы такого типа (${media.mime || "тип не определён"}).\n` +
+        "Поддерживаю картинки (JPEG, PNG, GIF, WebP) и PDF.",
+    );
+    return null;
+  }
+
+  const limitBytes = MAX_FILE_MB * 1024 * 1024;
+  const tooBig = async (bytes) => {
+    await reply(
+      chatId,
+      `Файл слишком большой: ${formatMb(bytes)} МБ, лимит ${MAX_FILE_MB} МБ.`,
+    );
+  };
+
+  // Размер из метаданных Telegram — чтобы не качать заведомо большой файл.
+  if (media.size > limitBytes) {
+    await tooBig(media.size);
+    return null;
+  }
+
+  const buffer = await downloadFile(media.fileId);
+  if (buffer.length > limitBytes) {
+    await tooBig(buffer.length);
+    return null;
+  }
+
+  const prompt =
+    text || (isPdf ? "Опиши, что в этом документе." : "Что на этом изображении?");
+
+  // Блок с файлом должен идти перед текстом — так модель отвечает точнее.
+  return [mediaBlock(media.mime, buffer.toString("base64")), { type: "text", text: prompt }];
+}
+
 // ------------------------------------------------------------- диалоги -----
 
 /** @type {Map<number, Array<{role: string, content: unknown}>>} */
@@ -109,6 +223,32 @@ function trimHistory(history) {
   if (history.length <= HISTORY_LIMIT) return;
   history.splice(0, history.length - HISTORY_LIMIT);
   while (history.length && history[0].role !== "user") history.shift();
+}
+
+// Картинки и PDF стоят дорого и уходят модели заново на каждом запросе.
+// Оставляем только свежие, старые заменяем пометкой.
+// Меняем исключительно user-сообщения: ответы модели нужно возвращать без правок.
+function pruneOldMedia(history) {
+  let seen = 0;
+
+  for (let i = history.length - 1; i >= 0; i--) {
+    const message = history[i];
+    if (message.role !== "user" || !Array.isArray(message.content)) continue;
+
+    const hasMedia = message.content.some(
+      (block) => block.type === "image" || block.type === "document",
+    );
+    if (!hasMedia) continue;
+
+    seen++;
+    if (seen <= MEDIA_CONTEXT_TURNS) continue;
+
+    message.content = message.content.map((block) => {
+      if (block.type !== "image" && block.type !== "document") return block;
+      const kind = block.type === "image" ? "Изображение" : "Документ";
+      return { type: "text", text: `[${kind} убран из контекста для экономии токенов]` };
+    });
+  }
 }
 
 // --------------------------------------------------------------- claude ----
@@ -146,29 +286,27 @@ function extractText(message) {
 
 // ------------------------------------------------------------ обработка ----
 
+const HELP =
+  "Напиши сообщение — отвечу.\n\n" +
+  "Ещё понимаю:\n" +
+  "• картинки — фото, скриншоты, схемы\n" +
+  `• PDF-документы (до ${MAX_FILE_MB} МБ)\n\n` +
+  "К файлу можно добавить подпись с вопросом — например «переведи текст» " +
+  "или «что тут не так». Без подписи просто опишу содержимое.\n\n" +
+  "/reset — очистить историю диалога\n" +
+  "/id — показать твой Telegram ID";
+
 const COMMANDS = {
-  "/start":
-    "Привет! Я бот на Claude. Просто напиши сообщение — отвечу.\n\n" +
-    "/reset — очистить историю диалога\n" +
-    "/id — показать твой Telegram ID\n" +
-    "/help — эта справка",
-  "/help":
-    "Просто напиши сообщение — отвечу.\n\n" +
-    "/reset — очистить историю диалога\n" +
-    "/id — показать твой Telegram ID",
+  "/start": `Привет! Я бот на Claude.\n\n${HELP}`,
+  "/help": HELP,
 };
 
 async function handleMessage(message) {
   const chatId = message.chat.id;
   const userId = String(message.from?.id ?? "");
-  const text = (message.text || "").trim();
+  const command = (message.text || "").trim().split(/\s+/)[0];
 
-  if (!text) {
-    await reply(chatId, "Я понимаю только текст — картинки и файлы пока не умею.");
-    return;
-  }
-
-  if (text === "/id") {
+  if (command === "/id") {
     await reply(chatId, `Твой Telegram ID: ${userId}`);
     return;
   }
@@ -178,7 +316,6 @@ async function handleMessage(message) {
     return;
   }
 
-  const command = text.split(/\s+/)[0];
   if (COMMANDS[command]) {
     await reply(chatId, COMMANDS[command]);
     return;
@@ -190,11 +327,45 @@ async function handleMessage(message) {
     return;
   }
 
-  const history = getHistory(chatId);
-  history.push({ role: "user", content: text });
-  trimHistory(history);
+  // Подпись к фото или документу — такой же вопрос, как обычный текст.
+  const text = (message.text || message.caption || "").trim();
+  const media = extractMedia(message);
+
+  if (!media && !text) {
+    const kind = unsupportedKind(message);
+    await reply(
+      chatId,
+      kind
+        ? `Пока не умею обрабатывать ${kind}. Пришли текст, картинку или PDF.`
+        : "Не понял сообщение. Пришли текст, картинку или PDF.",
+    );
+    return;
+  }
 
   const stopTyping = startTyping(chatId);
+  let content;
+
+  try {
+    content = media ? await buildMediaContent(chatId, media, text) : text;
+  } catch (error) {
+    stopTyping();
+    logError(error);
+    await reply(chatId, "Не удалось скачать файл из Telegram. Попробуй отправить заново.").catch(
+      () => {},
+    );
+    return;
+  }
+
+  if (!content) {
+    stopTyping();
+    return; // причину пользователю уже объяснили внутри buildMediaContent
+  }
+
+  const history = getHistory(chatId);
+  history.push({ role: "user", content });
+  trimHistory(history);
+  pruneOldMedia(history);
+
   try {
     const response = await askClaude(history);
 
