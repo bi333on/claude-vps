@@ -17,6 +17,9 @@ const ALLOWED_USER_IDS = new Set(
     .map((s) => s.trim())
     .filter(Boolean),
 );
+// Резервная модель при отказе классификаторов безопасности.
+// Поддерживается не всеми моделями — поэтому по умолчанию выключено.
+const ENABLE_FALLBACKS = /^(1|true|yes|on)$/i.test(process.env.ENABLE_FALLBACKS || "");
 
 // Клиент сам читает ANTHROPIC_API_KEY из окружения.
 const claude = new Anthropic();
@@ -111,16 +114,24 @@ function trimHistory(history) {
 // --------------------------------------------------------------- claude ----
 
 async function askClaude(history) {
-  const stream = claude.beta.messages.stream({
+  const params = {
     model: MODEL,
     max_tokens: MAX_TOKENS,
     system: SYSTEM_PROMPT,
     output_config: { effort: EFFORT },
-    // Если классификаторы безопасности отклонят запрос, Anthropic
-    // автоматически переотправит его на резервную модель.
+    messages: history,
+  };
+
+  if (!ENABLE_FALLBACKS) {
+    return claude.messages.stream(params).finalMessage();
+  }
+
+  // Если классификаторы безопасности отклонят запрос, Anthropic
+  // переотправит его на резервную модель в рамках того же вызова.
+  const stream = claude.beta.messages.stream({
+    ...params,
     betas: ["server-side-fallback-2026-07-01"],
     fallbacks: "default",
-    messages: history,
   });
   return stream.finalMessage();
 }
@@ -209,11 +220,28 @@ async function handleMessage(message) {
     }
   } catch (error) {
     history.pop();
-    console.error("Ошибка обработки сообщения:", error);
+    logError(error);
     await reply(chatId, formatUserError(error)).catch(() => {});
   } finally {
     stopTyping();
   }
+}
+
+// Текст ошибки от API — самое ценное при отладке конфига, не теряем его.
+function apiErrorDetail(error) {
+  const detail = error?.error?.error?.message ?? error?.error?.message;
+  return typeof detail === "string" ? detail : error.message;
+}
+
+function logError(error) {
+  if (error instanceof Anthropic.APIError) {
+    console.error(
+      `Claude API ${error.status}: ${apiErrorDetail(error)}\n` +
+        `  model=${MODEL} effort=${EFFORT} fallbacks=${ENABLE_FALLBACKS}`,
+    );
+    return;
+  }
+  console.error("Ошибка обработки сообщения:", error);
 }
 
 function formatUserError(error) {
@@ -225,6 +253,10 @@ function formatUserError(error) {
   }
   if (error instanceof Anthropic.APIConnectionError) {
     return "Не удалось связаться с Claude API. Попробуй ещё раз.";
+  }
+  // 400 — почти всегда ошибка конфигурации, а не сбой. Показываем причину.
+  if (error instanceof Anthropic.BadRequestError) {
+    return `Claude API отклонил запрос:\n${apiErrorDetail(error)}\n\nПроверь настройки в .env (модель, effort, max_tokens).`;
   }
   if (error instanceof Anthropic.APIError) {
     return `Ошибка Claude API (${error.status}). Попробуй ещё раз.`;
