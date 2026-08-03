@@ -1,36 +1,25 @@
-# Telegram-бот на Claude
+# Telegram-бот на Claude Code
 
 Бот принимает сообщения в Telegram и отвечает через Claude API. Помнит контекст диалога, работает по long polling (webhook и домен не нужны).
+Также понимает фото или PDF, бот скачивает файл из Telegram и передаёт его Claude напрямую — сторонние сервисы распознавания не нужны, дополнительных ключей тоже. 
+Подпись к файлу становится вопросом: скриншот с подписью «почему тут ошибка» получит ответ по делу, файл без подписи — описание содержимого.
 
 ## Что понадобится
 
 | Что | Где взять |
 |---|---|
-| Токен бота | [@BotFather](https://t.me/BotFather) → `/newbot` |
-| Ключ Claude API | [platform.claude.com](https://platform.claude.com/) → API Keys |
+| Токен бота | (https://t.me/BotFather) → `/newbot` |
+| Ключ Claude API | (https://platform.claude.com/) → API Keys |
 | VPS | Ubuntu 22.04/24.04, 1 GB RAM достаточно |
 
-**Никому не пересылайте эти два значения** — ни в чатах, ни в issue, ни в скриншотах. Они вписываются только в файл `.env` на сервере.
+**Никому не пересылайте эти два значения** — ни в чатах, ни в issue, ни в скриншотах. 
+Они вписываются только в файл `.env` на сервере.
 
 ---
 
-## Локальный запуск (проверить перед деплоем)
+## Установка на VPS с Ubuntu 22/24
 
-```powershell
-cd C:\bat\tg-claude-bot
-copy .env.example .env
-# впишите TELEGRAM_BOT_TOKEN и ANTHROPIC_API_KEY в .env
-npm install
-npm start
-```
-
-Напишите боту в Telegram — должен ответить.
-
----
-
-## Установка на VPS
-
-### 1. Node.js 22
+### 1. Установим Node.js 22
 
 ```bash
 curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
@@ -50,16 +39,10 @@ sudo chown claudebot:claudebot /opt/tg-claude-bot
 
 ### 3. Загрузить код
 
-С локальной машины (из папки проекта):
-
-```powershell
-scp bot.js package.json .env.example tg-claude-bot.service root@ВАШ_IP:/opt/tg-claude-bot/
-```
-
 Или через git, если проект в репозитории:
 
 ```bash
-sudo -u claudebot git clone https://github.com/ваш/репозиторий.git /opt/tg-claude-bot
+sudo -u claudebot git clone https://github.com/bi333on/claude-vps.git /opt/tg-claude-bot
 ```
 
 ### 4. Зависимости и конфиг
@@ -73,7 +56,7 @@ sudo -u claudebot nano .env          # вписать оба ключа
 sudo chmod 600 .env                  # файл читает только владелец
 ```
 
-### 5. Автозапуск через systemd
+### 5. Автозапуск бота через systemd
 
 ```bash
 sudo cp /opt/tg-claude-bot/tg-claude-bot.service /etc/systemd/system/
@@ -81,7 +64,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now tg-claude-bot
 ```
 
-Проверка:
+Проверка бота:
 
 ```bash
 sudo systemctl status tg-claude-bot
@@ -90,16 +73,13 @@ sudo journalctl -u tg-claude-bot -f      # живой лог
 
 В логе при успешном старте: `Бот @имя_бота запущен. Модель: claude-opus-5, effort: medium`
 
-### 6. Обновление кода
+### 6. Обновление бота
 
+# залить bot.js в /opt/tg-claude-bot
 ```bash
-cd /opt/tg-claude-bot
-sudo -u claudebot git pull              # или залить файлы заново через scp
-sudo -u claudebot npm install --omit=dev
 sudo systemctl restart tg-claude-bot
+sudo journalctl -u tg-claude-bot -f
 ```
-
----
 
 ## Настройки (`.env`)
 
@@ -112,10 +92,9 @@ sudo systemctl restart tg-claude-bot
 | `MAX_TOKENS` | `4096` | Максимальная длина ответа |
 | `HISTORY_LIMIT` | `30` | Сколько последних сообщений держать в контексте |
 | `SYSTEM_PROMPT` | см. `.env.example` | Характер бота |
-| `ALLOWED_USER_IDS` | пусто | Белый список ID через запятую. Пусто = отвечает всем |
+| `ALLOWED_USER_IDS` | пусто | Админы список ID через запятую. Пусто = отвечает всем |
 | `ENABLE_FALLBACKS` | `false` | Резервная модель при отказе классификаторов безопасности. Поддерживается не всеми моделями — при ошибке 400 держите выключенным |
 
-После правки `.env`: `sudo systemctl restart tg-claude-bot`
 
 **Ограничьте доступ, если бот не публичный.** Без `ALLOWED_USER_IDS` любой, кто найдёт бота, тратит ваш баланс Claude API. Свой ID узнаете командой `/id` в боте.
 
