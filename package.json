@@ -1,0 +1,17 @@
+{
+  "name": "tg-claude-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Telegram bot powered by the Claude API",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node --env-file=.env bot.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.70.0"
+  }
+}

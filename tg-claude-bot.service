@@ -1,0 +1,24 @@
+[Unit]
+Description=Telegram bot powered by Claude
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=claudebot
+WorkingDirectory=/opt/tg-claude-bot
+ExecStart=/usr/bin/node --env-file=/opt/tg-claude-bot/.env /opt/tg-claude-bot/bot.js
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Базовая изоляция процесса
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/tg-claude-bot
+
+[Install]
+WantedBy=multi-user.target
