@@ -14,6 +14,16 @@
 
 ---
 
+## Локальный запуск (проверить перед деплоем)
+
+```powershell
+cd C:\bat\tg-claude-bot
+copy .env.example .env
+# впишите TELEGRAM_BOT_TOKEN и ANTHROPIC_API_KEY в .env
+npm install
+npm start
+```
+
 Напишите боту в Telegram — должен ответить.
 
 ---
@@ -40,10 +50,16 @@ sudo chown claudebot:claudebot /opt/tg-claude-bot
 
 ### 3. Загрузить код
 
-Через git, если проект в репозитории:
+С локальной машины (из папки проекта):
+
+```powershell
+scp bot.js package.json .env.example tg-claude-bot.service root@ВАШ_IP:/opt/tg-claude-bot/
+```
+
+Или через git, если проект в репозитории:
 
 ```bash
-sudo -u claudebot git clone https://github.com/bi333on/claude-vps.git /opt/tg-claude-bot
+sudo -u claudebot git clone https://github.com/ваш/репозиторий.git /opt/tg-claude-bot
 ```
 
 ### 4. Зависимости и конфиг
@@ -97,6 +113,7 @@ sudo systemctl restart tg-claude-bot
 | `HISTORY_LIMIT` | `30` | Сколько последних сообщений держать в контексте |
 | `SYSTEM_PROMPT` | см. `.env.example` | Характер бота |
 | `ALLOWED_USER_IDS` | пусто | Белый список ID через запятую. Пусто = отвечает всем |
+| `ENABLE_FALLBACKS` | `false` | Резервная модель при отказе классификаторов безопасности. Поддерживается не всеми моделями — при ошибке 400 держите выключенным |
 
 После правки `.env`: `sudo systemctl restart tg-claude-bot`
 
@@ -131,5 +148,6 @@ sudo systemctl restart tg-claude-bot
 | `Telegram deleteWebhook: Unauthorized` | Неверный `TELEGRAM_BOT_TOKEN` |
 | `Проблема с ключом Claude API` в ответе бота | Неверный `ANTHROPIC_API_KEY` или нулевой баланс |
 | Бот молчит | `sudo journalctl -u tg-claude-bot -n 50` — смотреть лог |
+| `Claude API отклонил запрос` (400) | Ошибка в настройках. Бот покажет причину текстом — чаще всего неверная модель в `CLAUDE_MODEL` или включённый `ENABLE_FALLBACKS` на неподдерживаемой модели |
 | `Слишком много запросов` | Лимит Claude API — снизьте нагрузку или повысьте tier |
 | Ответы обрываются | Увеличьте `MAX_TOKENS` |
